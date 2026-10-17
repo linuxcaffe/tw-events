@@ -9,7 +9,7 @@ Public holidays from [holidata.net](https://holidata.net) as Taskwarrior 2.6.2 `
 
 - `holidata refresh` fetches this year and next for your locale, keeps the national holidays plus your regions, and writes `~/.task/config/holidays.rc`
 - `holidata` (or `task holidays`) lists what's installed; `holidata check` warns before they run out
-- Settings in `~/.task/config/holidata.rc`; the data file is included from `config/included.rc`
+- `holidata init --locale en-CA --regions ON` sets it up; settings live in `~/.task/config/holidata.rc`
 - Runs of consecutive days (a holiday week) become one `.start`/`.end` range, which 2.6.2 understands
 - A failed fetch keeps the old file; holiday names can't break out of their rc line
 - Respects `TW_TASK_DIR`. Python 3.8+, standard library only
@@ -24,14 +24,10 @@ Taskwarrior ships `holidays.<locale>.rc` files generated from holidata.net, but 
 
 ```bash
 tw -I holidata
+holidata init --locale en-CA --regions ON     # or: task holidays init …
 ```
 
-The installer writes `config/holidata.rc` (locale `en-US`, no regions), fetches, and adds the includes. Then set your locale and regions in that file (`task config` would write them to `~/.taskrc`, where holidata doesn't look) and refresh:
-
-```bash
-$EDITOR ~/.task/config/holidata.rc     # holidata.locale = en-CA, holidata.regions = ON
-holidata refresh
-```
+`init` writes `~/.task/config/holidata.rc`, fetches, and only then adds the includes (`included.rc` → `holidata.rc` → `holidays.rc`), so Taskwarrior never sees an include whose file is missing. Run it again to change a setting; it keeps everything else in the file. You can also edit `holidata.rc` by hand and run `holidata refresh` (`task config` would write to `~/.taskrc`, where holidata doesn't look).
 
 To see them in `task calendar` too:
 
@@ -56,6 +52,7 @@ Run `holidata refresh` after changing them; `holidata check` says when you haven
 
 | Command | Does |
 |---|---|
+| `holidata init [--locale L] [--regions R] [--types T] [--years N] [--json]` | Write the given settings (keeping the rest), refresh, then add the includes. Offline, it writes an empty data file so the include is still safe |
 | `holidata refresh [--source DIR] [--json]` | Fetch and rewrite `config/holidays.rc`. `--source` reads `DIR/<locale>/<year>.json` instead (offline, tests). A year that isn't published yet is skipped; any other failure leaves the file untouched (exit 2) |
 | `holidata [show] [--year Y] [--json]` | List the installed holidays |
 | `holidata check [--days 60] [--json]` | Read-only. Warns when the holidays end within `--days`, when the settings changed since the last refresh, or when `task` doesn't see the file (no include). [taskutil](https://github.com/linuxcaffe/tw-taskutil) runs it daily |

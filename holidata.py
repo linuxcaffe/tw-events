@@ -9,6 +9,10 @@ Commands
                                   keep national holidays plus holidata.regions,
                                   and rewrite config/holidays.rc. A failed fetch
                                   keeps the old file.
+  holidata init [--locale L] [--regions R] [--types T] [--years N] [--json]
+                                  Set up (or change) the settings, refresh, then
+                                  add the includes, so none ever points at a
+                                  missing file. Safe to run again.
   holidata show [--year Y] [--json]
                                   List the installed holidays (the default).
   holidata check [--days N] [--json]
@@ -18,8 +22,8 @@ Commands
                                   doesn't see them.
 
 Settings live in config/holidata.rc (holidata.locale, holidata.regions,
-holidata.types, holidata.years); the data goes to config/holidays.rc, which
-config/included.rc includes. Both are under the task dir: $TW_TASK_DIR, else
+holidata.types, holidata.years); the data goes to config/holidays.rc.
+config/included.rc includes holidata.rc, which includes holidays.rc. Both are under the task dir: $TW_TASK_DIR, else
 ~/.task. Exit 0 ok, 1 warnings, 2 failures. Standard library only.
 """
 import argparse
@@ -336,6 +340,79 @@ def check(days=60, now=None, settings_path=None, out_path=None, task_keys=_task_
     return checks
 
 
+SETTINGS_TEMPLATE = '''\
+# holidata settings: run `holidata refresh` after a change. See ~/.task/docs/holidata_README.md.
+holidata.locale  = {locale}
+holidata.regions = {regions}
+holidata.types   = {types}
+holidata.years   = {years}
+'''
+INCLUDE_DATA = 'include holidays.rc'          # relative: 2.6.2 resolves it from holidata.rc's folder
+
+
+def _set_settings(path, values):
+    """Write the given holidata.<key> values into the settings file, keeping everything else."""
+    if not path.is_file():
+        s = dict(DEFAULTS, **{k: v for k, v in values.items() if v is not None})
+        write_atomic(path, SETTINGS_TEMPLATE.format(**s))
+        return
+    lines = path.read_text().splitlines()
+    for k, v in values.items():
+        if v is None:
+            continue
+        pat = re.compile(rf'^\s*holidata\.{k}\s*=')
+        new = f'holidata.{k} = {v}'
+        for i, line in enumerate(lines):
+            if pat.match(line):
+                lines[i] = new
+                break
+        else:
+            lines.append(new)
+    write_atomic(path, '\n'.join(lines) + '\n')
+
+
+def _ensure_line(path, line):
+    """Append an active `line` unless it's there; a commented-out copy is re-enabled."""
+    lines = path.read_text().splitlines() if path.is_file() else []
+    if any(l.strip() == line for l in lines):
+        return False
+    for i, l in enumerate(lines):
+        if re.match(rf'^\s*#\s*{re.escape(line)}\s*(#.*)?$', l):
+            lines[i] = line
+            break
+    else:
+        lines.append(line)
+    write_atomic(path, '\n'.join(lines) + '\n')
+    return True
+
+
+def init(locale=None, regions=None, types=None, years=None, source=None, now=None):
+    sp, dp = settings_file(), data_file()
+    _set_settings(sp, {'locale': locale, 'regions': regions, 'types': types,
+                       'years': None if years is None else str(years)})
+    checks = [_check(str(sp), OK, 'settings written')]
+    checks += refresh(source, now)
+    if not dp.is_file():
+        # A first install that couldn't fetch: an empty file, so the include below is safe.
+        p = plan(read_settings(sp), (now or dt.datetime.now()).date())
+        write_atomic(dp, render([], p, now or dt.datetime.now()))
+        checks.append(_check(str(dp), WARN, 'written empty: run holidata refresh when online'))
+    if _ensure_line(sp, INCLUDE_DATA):
+        checks.append(_check(str(sp), OK, f'added: {INCLUDE_DATA}'))
+    included = task_dir() / 'config' / 'included.rc'
+    target = included if included.is_file() else \
+        Path(os.environ.get('TASKRC') or Path.home() / '.taskrc').expanduser()
+    home = str(Path.home())
+    inc = 'include ' + (str(sp).replace(home, '~', 1) if str(sp).startswith(home + '/') else str(sp))
+    if any(re.match(rf'^\s*include\s+\S*holidata\.rc\s*$', l)
+           for l in (target.read_text().splitlines() if target.is_file() else [])):
+        checks.append(_check(str(target), OK, 'already includes holidata.rc'))
+    else:
+        _ensure_line(target, inc)
+        checks.append(_check(str(target), OK, f'added: {inc}'))
+    return checks
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def _worst(checks):
@@ -376,6 +453,13 @@ def main(argv=None):
     rf = sub.add_parser('refresh', help='fetch from holidata.net and rewrite config/holidays.rc')
     rf.add_argument('--source', help='read DIR/<locale>/<year>.json instead of the site (tests, offline)')
     rf.add_argument('--json', action='store_true')
+    it = sub.add_parser('init', help='set up or change the settings, refresh, add the includes')
+    it.add_argument('--locale', help='holidata.net locale, or a comma list (default en-US)')
+    it.add_argument('--regions', help='region codes to keep besides national holidays, comma list')
+    it.add_argument('--types', help='keep only these type letters (N R F V)')
+    it.add_argument('--years', type=int, help='this year and the next N-1 (default 2)')
+    it.add_argument('--source', help=argparse.SUPPRESS)
+    it.add_argument('--json', action='store_true')
     sh = sub.add_parser('show', help='list the installed holidays')
     sh.add_argument('--year', type=int)
     sh.add_argument('--json', action='store_true')
@@ -386,6 +470,8 @@ def main(argv=None):
 
     if a.cmd == 'refresh':
         return _report(refresh(a.source), a.json)
+    if a.cmd == 'init':
+        return _report(init(a.locale, a.regions, a.types, a.years, a.source), a.json)
     if a.cmd == 'check':
         return _report(check(a.days), a.json)
     return _show_report(show(getattr(a, 'year', None)), getattr(a, 'json', False))

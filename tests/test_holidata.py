@@ -208,3 +208,59 @@ def test_task_reads_the_file(tmp_path, tdir, monkeypatch):
     assert 'Start of Break' in out and 'End of Break' in out
     keys = holidata._task_holiday_keys()
     assert keys == {'hd20261012a', 'hd20261224a'}
+
+
+# ── init ──────────────────────────────────────────────────────────────────────
+
+def _init(tdir, *args):
+    (tdir / 'config' / 'included.rc').touch()
+    return holidata.init(*args, source=FIXTURES, now=NOW)
+
+
+def test_init_writes_settings_data_and_includes(tdir):
+    checks = _init(tdir, 'en-CA', 'ON')
+    assert holidata._worst(checks) == holidata.OK, checks
+    s = holidata.read_settings()
+    assert (s['locale'], s['regions']) == ('en-CA', 'ON')
+    assert (tdir / 'config' / 'holidays.rc').is_file()
+    assert 'include holidays.rc' in (tdir / 'config' / 'holidata.rc').read_text().splitlines()
+    assert f"include {tdir / 'config' / 'holidata.rc'}" in (tdir / 'config' / 'included.rc').read_text()
+
+
+def test_init_twice_changes_only_what_is_given(tdir):
+    _init(tdir, 'en-CA', 'ON')
+    sp = tdir / 'config' / 'holidata.rc'
+    sp.write_text(sp.read_text() + '# my note\n')
+    _init(tdir, None, 'QC')
+    text = sp.read_text()
+    assert 'holidata.locale  = en-CA' in text and 'holidata.regions = QC' in text and '# my note' in text
+    assert text.count('include holidays.rc') == 1
+    assert (tdir / 'config' / 'included.rc').read_text().count('holidata.rc') == 1
+
+
+def test_init_reenables_a_commented_include(tdir):
+    (tdir / 'config' / 'included.rc').write_text(
+        f"#include {tdir / 'config' / 'holidata.rc'}   # removed with tw -r\n")
+    holidata.init('en-CA', 'ON', source=FIXTURES, now=NOW)
+    lines = (tdir / 'config' / 'included.rc').read_text().splitlines()
+    assert lines == [f"include {tdir / 'config' / 'holidata.rc'}"]
+
+
+def test_init_offline_still_leaves_no_dangling_include(tmp_path, tdir):
+    (tdir / 'config' / 'included.rc').touch()
+    checks = holidata.init('en-CA', 'ON', source=tmp_path / 'nothing', now=NOW)
+    assert holidata._worst(checks) == holidata.FAIL
+    assert (tdir / 'config' / 'holidays.rc').is_file()
+    assert 'include holidays.rc' in (tdir / 'config' / 'holidata.rc').read_text()
+
+
+@pytest.mark.skipif(not shutil.which('task'), reason='task not installed')
+def test_task_sees_holidays_after_init(tmp_path, tdir, monkeypatch):
+    rc = tmp_path / 'taskrc'
+    (tmp_path / 'data').mkdir()
+    rc.write_text(f"data.location={tmp_path / 'data'}\nhooks=off\nconfirmation=no\n"
+                  f"include {tdir / 'config' / 'included.rc'}\n")
+    monkeypatch.setenv('TASKRC', str(rc))
+    _init(tdir, 'en-CA', 'ON')
+    assert 'hd20261012a' in holidata._task_holiday_keys()
+    assert holidata._worst(holidata.check(now=NOW)) == holidata.OK
