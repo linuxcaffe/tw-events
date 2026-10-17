@@ -35,6 +35,8 @@ To see them in `task calendar` too:
 task config calendar.holidays full     # or sparse
 ```
 
+`tw -r holidata` removes the command and the README but leaves `holidata.rc`, `holidays.rc` and the include, so Taskwarrior still starts and the holidays stay. To drop them, delete the `include ~/.task/config/holidata.rc` line from `config/included.rc`.
+
 ## Settings
 
 `~/.task/config/holidata.rc`:
