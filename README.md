@@ -7,9 +7,10 @@ Public holidays from [holidata.net](https://holidata.net) as Taskwarrior 2.6.2 `
 
 ## TL;DR
 
+- `tw -I holidata`, then `holidata init --locale en-CA --regions ON`: two steps, and the second one is what fetches
 - `holidata refresh` fetches this year and next for your locale, keeps the national holidays plus your regions, and writes `~/.task/config/holidays.rc`
 - `holidata` (or `task holidays`) lists what's installed; `holidata check` warns before they run out
-- `holidata init --locale en-CA --regions ON` sets it up; settings live in `~/.task/config/holidata.rc`
+- Settings live in `~/.task/config/holidata.rc`; `task calendar` and tw-web read the result
 - Runs of consecutive days (a holiday week) become one `.start`/`.end` range, which 2.6.2 understands
 - A failed fetch keeps the old file; holiday names can't break out of their rc line
 - Respects `TW_TASK_DIR`. Python 3.8+, standard library only
@@ -22,9 +23,26 @@ Taskwarrior ships `holidays.<locale>.rc` files generated from holidata.net, but 
 
 ## Install
 
+Two steps. **`tw -I` installs the command only; nothing is fetched until you run `init`.**
+
 ```bash
-tw -I holidata
-holidata init --locale en-CA --regions ON     # or: task holidays init …
+tw -I holidata                                 # 1. the command (and `task holidays`)
+holidata init --locale en-CA --regions ON      # 2. your settings, the holidays, the includes
+```
+
+`--locale` is a holidata.net locale (`en-US`, `en-GB`, `de-DE`, `fr-CA`, …; the site lists them all). `--regions` takes the region codes holidata uses, the second half of ISO 3166-2 (`ON`, `QC`, `NY`, `BY`); leave it out for national holidays only. Then:
+
+```console
+$ holidata show --year 2026
+2026-01-01              New Year's Day  (NF)
+2026-02-16              Family Day  (ON V)
+2026-04-03              Good Friday  (NRV)
+2026-05-18              Victoria Day  (ON V)
+2026-07-01              Canada Day  (NF)
+2026-09-07              Labour Day  (NV)
+2026-10-12              Thanksgiving Day  (ON V)
+2026-12-25              Christmas Day  (NRF)
+2026-12-26              Boxing Day  (NRF)
 ```
 
 `init` writes `~/.task/config/holidata.rc`, fetches, and only then adds the includes (`included.rc` → `holidata.rc` → `holidays.rc`), so Taskwarrior never sees an include whose file is missing. Run it again to change a setting; it keeps everything else in the file. You can also edit `holidata.rc` by hand and run `holidata refresh` (`task config` would write to `~/.taskrc`, where holidata doesn't look).
@@ -34,6 +52,8 @@ To see them in `task calendar` too:
 ```bash
 task config calendar.holidays full     # or sparse
 ```
+
+In [tw-web](https://github.com/linuxcaffe/tw-web) they show as amber all-day bars in the Calendar and on the Agenda's date lines (Settings → Calendar → Holidays).
 
 `tw -r holidata` removes the command and the README but leaves `holidata.rc`, `holidays.rc` and the include, so Taskwarrior still starts and the holidays stay. To drop them, delete the `include ~/.task/config/holidata.rc` line from `config/included.rc`.
 
@@ -75,6 +95,11 @@ holiday.hd20261012a.region=ON
 ```
 
 Keys are `hd<date><a,b,…>`. `.name`, `.date` (or `.start`/`.end`) are Taskwarrior's own; `.type`, `.region` and `.locale` are extra keys Taskwarrior ignores and clients may use. A `#` in a name becomes `＃`, because 2.6.2 reads the rest of the line as a comment. Don't edit the file: `refresh` rewrites it whole.
+
+## Changes
+
+- **0.1.1** — `holidata check` and `holidata show` say to run `holidata init` when it hasn't been run (they suggested `tw -I` or `refresh`, which don't set anything up). README: the two install steps, locale and region codes, sample output.
+- **0.1.0** — `init`, `refresh`, `show`, `check`.
 
 ## Tests
 

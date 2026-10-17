@@ -38,7 +38,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-__version__ = '0.1.0'
+__version__ = '0.1.1'
 
 OK, WARN, FAIL = 'ok', 'warn', 'fail'
 BASE_URL = 'https://holidata.net'
@@ -308,7 +308,8 @@ def check(days=60, now=None, settings_path=None, out_path=None, task_keys=_task_
     settings_path = Path(settings_path or settings_file())
     out_path = Path(out_path or data_file())
     if not settings_path.is_file():
-        return [_check('settings', WARN, f'{settings_path} not found (install with tw -I holidata)')]
+        return [_check('settings', WARN, 'not set up yet: run holidata init --locale <xx-XX> '
+                                         '[--regions R] (installing fetches nothing)')]
     p = plan(read_settings(settings_path), now.date())
     header, rows = read_data(out_path)
     checks = []
@@ -437,7 +438,10 @@ def _show_report(rows, as_json):
                           for r in rows], indent=2, ensure_ascii=False))
         return 0
     if not rows:
-        print('No holidays installed. Run holidata refresh.')
+        if settings_file().is_file():
+            print('No holidays installed. Run holidata refresh.')
+        else:
+            print('Not set up yet. Run holidata init --locale <xx-XX> [--regions R], e.g. --locale en-CA --regions ON.')
         return 1
     for r in rows:
         when = str(r['start']) if r['start'] == r['end'] else f"{r['start']} – {r['end']}"

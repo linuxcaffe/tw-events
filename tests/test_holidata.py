@@ -185,9 +185,16 @@ def test_check_warns_when_task_does_not_see_them(tdir):
     assert c['status'] == holidata.WARN and 'include' in c['detail']
 
 
-def test_check_without_install(tdir):
+def test_check_before_init_says_run_init(tdir):
+    # Installed (this is holidata running) but never set up: tw -I alone writes nothing.
     checks = holidata.check(now=NOW, task_keys=None)
     assert holidata._worst(checks) == holidata.WARN
+    assert 'holidata init --locale' in checks[0]['detail'] and 'tw -I' not in checks[0]['detail']
+
+
+def test_show_before_init_says_run_init(tdir, capsys):
+    assert holidata.main(['show']) == 1
+    assert 'holidata init' in capsys.readouterr().out
 
 
 # ── the real binary ───────────────────────────────────────────────────────────
