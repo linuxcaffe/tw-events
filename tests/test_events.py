@@ -372,7 +372,7 @@ def test_init_moves_holidata_settings_and_include(tdir):
     assert inc.read_text().splitlines() == ['include ~/.task/config/annn.rc',
                                             f"include {tdir / 'config' / 'events.rc'}"]
     rc = (tdir / 'config' / 'events.rc').read_text().splitlines()
-    assert rc[-2:] == ['include holidays.rc', 'include sky.rc']
+    assert rc[-3:] == ['include holidays.rc', 'include sky.rc', 'include mine.rc']
     assert rc.index('events.moon    = yes') < rc.index('include holidays.rc')
 
 
@@ -388,3 +388,152 @@ def test_task_sees_the_sky(tmp_path, tdir, monkeypatch):
     assert 'hd20261012a' in keys and any(k.startswith('mn') for k in keys) and any(k.startswith('ss') for k in keys)
     out = subprocess.run(['task', 'rc.color=off', 'calendar', '12', '2026'], capture_output=True, text=True).stdout
     assert 'Full Moon' in out and 'December Solstice' in out and 'Christmas Day' in out
+
+
+# ── my events (config/my-events.txt → mine.rc) and ghosts (events add) ────────
+
+def mine(tdir, body):
+    (tdir / 'config' / 'my-events.txt').write_text(body)
+
+
+def mine_rows(tdir):
+    return events.read_data(tdir / 'config' / 'mine.rc')[1]
+
+
+def test_my_events_lines_and_date_blocks(tdir, tz):
+    tz('America/Toronto')
+    settings(tdir, 'events.locale = en-CA\nevents.years = 1\n')
+    mine(tdir, "# a comment\n; another\n* an org heading\n\n"
+               "2026-10-29 14:30  Dentist\n"
+               "2026-11-05\n"
+               "  09:00  Board meeting\n"
+               "    Library books due\n"
+               "2026-12-24..2026-12-27  Cottage\n")
+    checks = events.refresh(FIXTURES, now=NOW)
+    assert events._worst(checks) != events.FAIL, checks
+    rows = mine_rows(tdir)
+    got = [(str(r['start']), str(r['end']), r['name'], r.get('at', '')) for r in rows]
+    assert got == [('2026-10-29', '2026-10-29', 'Dentist', '20261029T183000Z'),
+                   ('2026-11-05', '2026-11-05', 'Library books due', ''),
+                   ('2026-11-05', '2026-11-05', 'Board meeting', '20261105T140000Z'),
+                   ('2026-12-24', '2026-12-27', 'Cottage', '')]
+    assert {r['kind'] for r in rows} == {'mine'}
+    assert [r['key'] for r in rows] == ['me20261029a', 'me20261105a', 'me20261105b', 'me20261224a']
+
+
+def test_yearly_events_repeat_over_the_years(tdir):
+    settings(tdir, 'events.locale = en-CA\nevents.years = 2\n')
+    mine(tdir, "--04-12  Anne's birthday\n--02-29  Leap day\n--12-31..--01-01  Turn of the year\n")
+    events.refresh(FIXTURES, now=NOW)
+    got = [(str(r['start']), str(r['end']), r['name']) for r in mine_rows(tdir)]
+    assert got == [('2026-02-28', '2026-02-28', 'Leap day'),
+                   ('2026-04-12', '2026-04-12', "Anne's birthday"),
+                   ('2026-12-31', '2027-01-01', 'Turn of the year'),
+                   ('2027-02-28', '2027-02-28', 'Leap day'),
+                   ('2027-04-12', '2027-04-12', "Anne's birthday"),
+                   ('2027-12-31', '2028-01-01', 'Turn of the year')]
+
+
+def test_bad_lines_are_reported_and_skipped(tdir):
+    settings(tdir, 'events.locale = en-CA\nevents.years = 1\n')
+    mine(tdir, "  09:00  Orphan, no date yet\n2026-02-30  No such day\n2026-10-29 25:00  Bad time\n"
+               "2026-12-24..2026-12-26 10:00  Timed range\n10/29  Not a date\n2026-10-30  Fine #2\n")
+    checks = events.refresh(FIXTURES, now=NOW)
+    bad = [c for c in checks if c['check'].startswith('my-events.txt:')]
+    assert [c['check'] for c in bad] == [f'my-events.txt:{n}' for n in (1, 2, 3, 4, 5)]
+    assert all(c['status'] == events.WARN for c in bad)
+    assert [(r['name']) for r in mine_rows(tdir)] == ['Fine ＃2']
+    assert [c['check'] for c in events.check(now=NOW, task_keys=None)
+            if c['check'].startswith('my-events.txt:')] == [c['check'] for c in bad]
+
+
+def test_no_my_events_file_writes_an_empty_mine_rc(tdir):
+    settings(tdir, 'events.locale = en-CA\nevents.years = 1\n')
+    events.refresh(FIXTURES, now=NOW)
+    assert (tdir / 'config' / 'mine.rc').is_file() and mine_rows(tdir) == []
+
+
+def test_refresh_adds_the_mine_include_once_the_file_exists(tdir):
+    settings(tdir, 'events.locale = en-CA\ninclude holidays.rc\ninclude sky.rc\n')   # a 0.2 install
+    events.refresh(FIXTURES, now=NOW)
+    events.refresh(FIXTURES, now=NOW)
+    assert (tdir / 'config' / 'events.rc').read_text().splitlines().count('include mine.rc') == 1
+
+
+def test_check_warns_when_my_events_changed(tdir):
+    settings(tdir, 'events.locale = en-CA\n')
+    mine(tdir, '2026-10-29  Dentist\n')
+    events.refresh(FIXTURES, now=NOW)
+    assert all(c['check'] != 'my events' or c['status'] == events.OK
+               for c in events.check(now=NOW, task_keys=None))
+    mine(tdir, '2026-10-29  Dentist\n2026-10-30  Again\n')
+    c = next(c for c in events.check(now=NOW, task_keys=None) if c['check'] == 'my events')
+    assert c['status'] == events.WARN and 'events refresh' in c['detail']
+
+
+def test_show_lists_my_events(tdir, capsys, tz):
+    tz('America/Toronto')
+    settings(tdir, 'events.locale = en-CA\nevents.years = 1\n')
+    mine(tdir, '2026-10-29 14:30  Dentist\n2026-12-24..2026-12-27  Cottage\n')
+    events.refresh(FIXTURES, now=NOW)
+    events.main(['show', '--year', '2026'])
+    out = capsys.readouterr().out
+    assert '2026-10-29 14:30        Dentist  (mine)' in out
+    assert '2026-12-24 – 2026-12-27 Cottage  (mine)' in out
+
+
+def _task_env(tmp_path, tdir, monkeypatch):
+    rc = tmp_path / 'taskrc'
+    (tmp_path / 'data').mkdir()
+    rc.write_text(f"data.location={tmp_path / 'data'}\nhooks=off\nconfirmation=no\n"
+                  f"include {tdir / 'config' / 'events.rc'}\n")
+    monkeypatch.setenv('TASKRC', str(rc))
+    settings(tdir, 'events.locale = en-CA\nevents.years = 1\n')
+    def task(*args):
+        return subprocess.run(['task', *args], capture_output=True, text=True, timeout=15)
+    return task
+
+
+def _uuid(task, n):
+    return task(str(n), '_uuid').stdout.strip()
+
+
+@pytest.mark.skipif(not shutil.which('task'), reason='task not installed')
+def test_add_makes_a_ghost_that_outlives_its_task(tmp_path, tdir, monkeypatch, tz):
+    tz('America/Toronto')
+    task = _task_env(tmp_path, tdir, monkeypatch)
+    task('add', 'due:2026-10-29T14:30', '--', 'Dentist #2')
+    task('1', 'annotate', '--', 'called the clinic')
+    task('add', 'scheduled:2026-11-02', '--', 'Pick up glasses')
+    u1, u2 = _uuid(task, 1), _uuid(task, 2)
+    checks = events.add(['1', u2], now=NOW)
+    assert events._worst(checks) == events.OK, checks
+    text = (tdir / 'config' / 'my-events.txt').read_text()
+    assert f'# ghost of {u1}' in text and '# annotation ' in text and 'called the clinic' in text
+    assert '2026-10-29 14:30  Dentist #2' in text
+    assert '2026-11-02  Pick up glasses' in text
+    task('1', 'done')
+    task(u2, 'delete')
+    assert {'me20261029a', 'me20261102a'} <= events._task_holiday_keys()
+    rows = mine_rows(tdir)
+    assert [(r['name'], r.get('at', '')) for r in rows] == [('Dentist ＃2', '20261029T183000Z'),
+                                                            ('Pick up glasses', '')]
+
+
+@pytest.mark.skipif(not shutil.which('task'), reason='task not installed')
+def test_add_refuses_twice_no_date_and_templates(tmp_path, tdir, monkeypatch):
+    task = _task_env(tmp_path, tdir, monkeypatch)
+    task('add', 'due:2026-10-29', '--', 'Once')
+    task('add', '--', 'No date')
+    task('add', 'due:2026-10-29', 'recur:weekly', '--', 'Weekly')
+    assert events._worst(events.add(['1'], now=NOW)) == events.OK
+    checks = events.add(['1', '2', '3'], now=NOW)
+    assert [c['status'] for c in checks if c['check'].startswith('task ')] == [events.WARN] * 3, checks
+    assert 'already' in checks[0]['detail'] and 'due or scheduled' in checks[1]['detail']
+    assert (tdir / 'config' / 'my-events.txt').read_text().count('# ghost of') == 1
+
+
+def test_add_refuses_anything_but_ids_and_uuids(tdir, monkeypatch):
+    monkeypatch.setattr(events.subprocess, 'run', lambda *a, **k: pytest.fail('ran task'))
+    checks = events.add(['rc.data.location=/tmp', 'project:x'], now=NOW)
+    assert [c['status'] for c in checks] == [events.FAIL, events.FAIL]

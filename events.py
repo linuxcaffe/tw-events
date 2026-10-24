@@ -24,9 +24,15 @@ Commands
                                   N days (default 60), when the settings changed
                                   since the last refresh, or when task doesn't
                                   see them.
+  events add <id|uuid>… [--json]  A ghost of each task: its description at its
+                                  due (else scheduled) date and time, appended to
+                                  config/my-events.txt, so it stays on the calendar
+                                  after the task is done or deleted.
 
 Settings live in config/events.rc, which config/included.rc includes and which
-includes holidays.rc and sky.rc. All under the task dir: $TW_TASK_DIR, else
+includes holidays.rc, sky.rc and mine.rc. Your own events are config/my-events.txt
+(timedot style: a date, then its events; --MM-DD every year), which refresh and add
+turn into mine.rc. All under the task dir: $TW_TASK_DIR, else
 ~/.task. Exit 0 ok, 1 warnings, 2 failures. Standard library only.
 """
 import argparse
@@ -41,13 +47,13 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-__version__ = '0.2.0'
+__version__ = '0.3.0'
 
 OK, WARN, FAIL = 'ok', 'warn', 'fail'
 BASE_URL = 'https://holidata.net'
 DEFAULTS = {'locale': 'en-US', 'regions': '', 'types': '', 'years': '2', 'moon': 'no', 'seasons': 'no'}
-HEADER_RE = re.compile(r'^# (?:holidata|events|events-sky): (.*)$')
-ENTRY_RE = re.compile(r'^holiday\.((?:hd|mn|ss)\d{8}[a-z]+)\.'
+HEADER_RE = re.compile(r'^# (?:holidata|events|events-sky|events-mine): (.*)$')
+ENTRY_RE = re.compile(r'^holiday\.((?:hd|mn|ss|me)\d{8}[a-z]+)\.'
                       r'(name|date|start|end|type|region|locale|kind|at)=(.*)$')
 YES = ('yes', 'on', 'true', '1', 'y')
 
@@ -73,6 +79,15 @@ def data_file():
 
 def sky_file():
     return task_dir() / 'config' / 'sky.rc'
+
+
+def my_events_file():
+    """Yours: hand-edited; `events add` only ever appends to it. Taskwarrior doesn't read it."""
+    return task_dir() / 'config' / 'my-events.txt'
+
+
+def mine_file():
+    return task_dir() / 'config' / 'mine.rc'
 
 
 def read_settings(path=None):
@@ -403,6 +418,151 @@ def render_sky(rows, p, now):
     return '\n'.join(out) + '\n'
 
 
+# ── my events: config/my-events.txt (timedot style) → mine.rc ──────────────────
+# A line starting (column 0) with a date sets the current date; an event may follow on the same
+# line, and indented lines under it are more events that day: `[HH:MM]  name`. A date is
+# YYYY-MM-DD, or --MM-DD for every year (29 February falls on the 28th in common years); A..B is
+# a run of days, untimed. Lines starting with #, ; or * are comments.
+
+_DAY = r'(?:\d{4}|-)-\d{2}-\d{2}'
+_DATE_LINE_RE = re.compile(rf'^({_DAY})(?:\.\.({_DAY}))?(?:\s+(.*))?$')
+_EVENT_RE = re.compile(r'^(?:(\d{1,2}:\d{2})(?:\s+|$))?(.*)$')
+
+
+def _day(spec, year):
+    """A date spec on a given year (the spec's own year if it has one); ValueError if no such day."""
+    y, m, d = spec.split('-')[-3:] if not spec.startswith('--') else (year, *spec[2:].split('-'))
+    y, m, d = int(y), int(m), int(d)
+    if spec.startswith('--') and (m, d) == (2, 29):
+        try:
+            return dt.date(y, 2, 29)
+        except ValueError:
+            return dt.date(y, 2, 28)
+    return dt.date(y, m, d)
+
+
+def parse_my_events(text):
+    """(events, problems): events as {'line', 'start', 'end', 'time', 'name'} with date specs
+    (strings); problems as (line number, reason)."""
+    out, problems, current = [], [], None
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.rstrip()
+        if not line.strip() or line.lstrip()[0] in '#;*':
+            continue
+        if not line[0].isspace():
+            m = _DATE_LINE_RE.match(line)
+            if not m:
+                problems.append((n, 'not a date (YYYY-MM-DD or --MM-DD)'))
+                current = None
+                continue
+            start, end, rest = m.group(1), m.group(2) or m.group(1), (m.group(3) or '').strip()
+            try:
+                _day(start, 2024), _day(end, 2024)
+                if start.startswith('--') != end.startswith('--'):
+                    raise ValueError
+                if not start.startswith('--') and _day(end, 0) < _day(start, 0):
+                    raise ValueError
+            except ValueError:
+                problems.append((n, 'no such date (or a range that runs backwards)'))
+                current = None
+                continue
+            current = (start, end)
+            if not rest:
+                continue
+        elif current is None:
+            problems.append((n, 'an indented event with no date line above it'))
+            continue
+        else:
+            rest = line.strip()
+        m = _EVENT_RE.match(rest)
+        time_, name = m.group(1), m.group(2).strip()
+        if time_:
+            try:
+                time_ = dt.datetime.strptime(time_, '%H:%M').strftime('%H:%M')
+            except ValueError:
+                problems.append((n, f'no such time: {time_}'))
+                continue
+            if current[0] != current[1]:
+                problems.append((n, 'a run of days takes no time'))
+                continue
+        if not name:
+            problems.append((n, 'no name'))
+            continue
+        out.append({'line': n, 'start': current[0], 'end': current[1], 'time': time_, 'name': name})
+    return out, problems
+
+
+def mine_entries(events_, years):
+    """Parsed events → entries for the planned years (one-offs whatever their year), keys me<date><a…>."""
+    rows = []
+    for e in events_:
+        for year in (years if e['start'].startswith('--') else [None]):
+            start = _day(e['start'], year)
+            end = _day(e['end'], year)
+            if end < start:                        # --12-31..--01-01
+                end = _day(e['end'], year + 1)
+            at = ''
+            if e['time']:
+                local = dt.datetime.combine(start, dt.datetime.strptime(e['time'], '%H:%M').time())
+                at = local.astimezone().astimezone(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+            rows.append({'start': start, 'end': end, 'name': clean(e['name']), 'at': at, 'kind': 'mine'})
+    rows = [r for r in rows if r['name']]
+    rows.sort(key=lambda r: (r['start'], r['at'], r['name']))   # a day's all-day ones first
+    counts = {}
+    for r in rows:
+        day = r['start'].strftime('%Y%m%d')
+        n = counts.get(day, 0)
+        counts[day] = n + 1
+        r['key'] = 'me' + day + _suffix(n)
+    return rows
+
+
+def _mine_text(source_text, p):
+    import hashlib
+    digest = hashlib.sha256(source_text.encode()).hexdigest()[:12]
+    return f"source={digest} years={','.join(map(str, p['years']))}"
+
+
+def render_mine(rows, header, now):
+    out = [
+        '# Your own events, from config/my-events.txt, written by `events refresh` and `events add`.',
+        '# Do not edit: change config/my-events.txt and run `events refresh`.',
+        f'# events-mine: {header}',
+        f'# generated {now.strftime("%Y-%m-%d %H:%M")}',
+        '',
+    ]
+    for r in rows:
+        k = f"holiday.{r['key']}"
+        out.append(f"{k}.name={r['name']}")
+        if r['start'] == r['end']:
+            out.append(f"{k}.date={r['start'].strftime('%Y%m%d')}")
+        else:
+            out.append(f"{k}.start={r['start'].strftime('%Y%m%d')}")
+            out.append(f"{k}.end={r['end'].strftime('%Y%m%d')}")
+        out.append(f'{k}.kind=mine')
+        if r['at']:
+            out.append(f"{k}.at={r['at']}")
+    return '\n'.join(out) + '\n'
+
+
+def _read_my_events():
+    f = my_events_file()
+    return f.read_text(errors='replace') if f.is_file() else ''
+
+
+def _problem_checks(problems):
+    return [_check(f'{my_events_file().name}:{n}', WARN, f'{why} (line skipped)') for n, why in problems]
+
+
+def write_mine(p, now):
+    """Rebuild mine.rc from my-events.txt (no network). Always written, empty with no events."""
+    text = _read_my_events()
+    parsed, problems = parse_my_events(text)
+    rows = mine_entries(parsed, p['years'])
+    write_atomic(mine_file(), render_mine(rows, _mine_text(text, p), now))
+    return _problem_checks(problems) + [_check(str(mine_file()), OK, f'{len(rows)} of your events written')]
+
+
 # ── commands ──────────────────────────────────────────────────────────────────
 
 def _check(name, status, detail):
@@ -444,7 +604,20 @@ def refresh(source=None, now=None, settings_path=None, out_path=None, sky_path=N
     write_atomic(sky_path, render_sky(sky, p, now))
     what = ' and '.join(w for w, on in (('moon phases', p['moon']), ('seasons', p['seasons'])) if on)
     checks.append(_check(str(sky_path), OK, f'{len(sky)} {what} written' if what else 'moon and seasons off'))
+    if out_path == data_file():
+        checks += write_mine(p, now)
+        checks += _include_written(settings_path)
     return checks
+
+
+def _include_written(settings_path=None):
+    """An installed events.rc gets the include of each file that exists (mine.rc for a 0.2 install).
+    A missing file's include waits, so none ever dangles."""
+    sp = Path(settings_path or settings_file())
+    if not sp.is_file():
+        return []
+    return [_check(str(sp), OK, f'added: {line}') for line in INCLUDES
+            if (sp.parent / line.split()[1]).is_file() and _ensure_line(sp, line)]
 
 
 def read_data(path=None):
@@ -474,7 +647,7 @@ def read_data(path=None):
 
 
 def show(year=None):
-    rows = read_data(data_file())[1] + read_data(sky_file())[1]
+    rows = read_data(data_file())[1] + read_data(sky_file())[1] + read_data(mine_file())[1]
     rows.sort(key=lambda r: (r['start'], r.get('at', ''), r.get('name', '')))
     if year:
         rows = [r for r in rows if r['start'].year <= year <= r['end'].year]
@@ -529,8 +702,17 @@ def check(days=60, now=None, settings_path=None, out_path=None, sky_path=None, t
             checks.append(_check('sky', WARN, 'moon/seasons changed since the last refresh: run events refresh'))
         else:
             checks.append(_coverage('sky', sky, now, days, 'moon phases and seasons'))
+    mine_header, mine_rows = read_data(mine_file())
+    text = _read_my_events()
+    checks += _problem_checks(parse_my_events(text)[1])
+    if text.strip():
+        if _strip_years(mine_header) != _strip_years(_mine_text(text, p)):
+            checks.append(_check('my events', WARN, 'my-events.txt changed since mine.rc was written: '
+                                                    'run events refresh'))
+        else:
+            checks.append(_check('my events', OK, f'{len(mine_rows)} entries'))
     keys = task_keys() if task_keys else None
-    ours = {r['key'] for r in rows + sky}
+    ours = {r['key'] for r in rows + sky + mine_rows}
     if keys is None:
         checks.append(_check('task sees them', WARN, 'could not run task'))
     elif ours and not keys & ours:
@@ -550,7 +732,20 @@ events.years   = {years}
 events.moon    = {moon}
 events.seasons = {seasons}
 """
-INCLUDES = ('include holidays.rc', 'include sky.rc')   # relative: 2.6.2 resolves them from events.rc's folder
+MY_EVENTS_TEMPLATE = """\
+# Your own events. Run `events refresh` after a change; `events add <id>` appends ghosts of tasks.
+# A date, an optional time, the name; or a date on its own line with that day's events indented:
+#
+#   2026-10-29 14:30  Dentist
+#   --04-12           Anne's birthday            (--MM-DD: every year)
+#   2026-12-24..2026-12-27  Cottage              (a run of days)
+#   2026-11-05
+#     09:00  Board meeting
+#     Library books due
+#
+# Lines starting with #, ; or * are comments.
+"""
+INCLUDES = ('include holidays.rc', 'include sky.rc', 'include mine.rc')   # relative: 2.6.2 resolves them from events.rc's folder
 
 
 def _set_settings(path, values):
@@ -623,6 +818,10 @@ def init(locale=None, regions=None, types=None, years=None, moon=None, seasons=N
         p = plan(read_settings(sp), (now or dt.datetime.now()).date())
         write_atomic(dp, render([], p, now or dt.datetime.now()))
         checks.append(_check(str(dp), WARN, 'written empty: run events refresh when online'))
+    if not my_events_file().exists():
+        write_atomic(my_events_file(), MY_EVENTS_TEMPLATE)
+        checks.append(_check(str(my_events_file()), OK, 'written (empty, with examples): your own events'))
+        checks += write_mine(plan(read_settings(sp), (now or dt.datetime.now()).date()), now or dt.datetime.now())
     for line in INCLUDES:
         if _ensure_line(sp, line):
             checks.append(_check(str(sp), OK, f'added: {line}'))
@@ -642,6 +841,72 @@ def init(locale=None, regions=None, types=None, years=None, moon=None, seasons=N
     if legacy.is_file():
         legacy.unlink()
         checks.append(_check(str(legacy), OK, f'removed (holidata 0.1){", and its include" if dropped else ""}'))
+    return checks
+
+
+# ── ghosts: events add <id|uuid> ──────────────────────────────────────────────
+
+_TASK_REF_RE = re.compile(r'^(?:\d+|[0-9a-fA-F]{8}(?:-[0-9a-fA-F-]{4,})?)$')
+
+
+def _export(refs):
+    r = subprocess.run(['task', 'rc.hooks=off', 'rc.context=none', 'rc.confirmation=no', 'rc.verbose=nothing',
+                        *refs, 'export'], capture_output=True, text=True, timeout=15)
+    if r.returncode != 0:
+        raise OSError(r.stderr.strip() or f'task exited {r.returncode}')
+    return json.loads(r.stdout or '[]')
+
+
+def _local(stamp):
+    return dt.datetime.strptime(stamp, '%Y%m%dT%H%M%SZ').replace(tzinfo=dt.timezone.utc).astimezone()
+
+
+def ghost_lines(t):
+    """A task → its lines in my-events.txt: the UUID and annotations as comments, then the event.
+    Midnight (and 23:59:59, an end-of-day date) means no time."""
+    when = _local(t.get('due') or t['scheduled'])
+    time_ = '' if when.strftime('%H:%M:%S') in ('00:00:00', '23:59:59') else ' ' + when.strftime('%H:%M')
+    name = ' '.join(''.join(ch if ch.isprintable() else ' ' for ch in t.get('description', '')).split())
+    lines = [f"# ghost of {t['uuid']}  (events add, {dt.date.today().isoformat()})"]
+    for a in t.get('annotations', []):
+        note = ' '.join(''.join(ch if ch.isprintable() else ' ' for ch in a.get('description', '')).split())
+        lines.append(f"# annotation {_local(a['entry']).strftime('%Y-%m-%d')}: {note}")
+    lines.append(f"{when.strftime('%Y-%m-%d')}{time_}  {name}")
+    return lines
+
+
+def add(refs, now=None):
+    """Append a ghost of each task to my-events.txt, then rebuild mine.rc."""
+    now = now or dt.datetime.now()
+    checks = [_check(f'task {r}', FAIL, 'not a task ID or UUID') for r in refs if not _TASK_REF_RE.match(r)]
+    good = [r for r in refs if _TASK_REF_RE.match(r)]
+    if not good:
+        return checks
+    try:
+        tasks = _export(good)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as e:
+        return checks + [_check('task', FAIL, f'could not read the tasks: {e}')]
+    text = _read_my_events()
+    new = []
+    for t in tasks:
+        ref, label = t['uuid'], f"task {t.get('id') or t['uuid'][:8]}"
+        if f'# ghost of {ref}' in text or any(f'# ghost of {ref}' in l for l in new):
+            checks.append(_check(label, WARN, f'already a ghost: edit {my_events_file().name}'))
+        elif t.get('status') == 'recurring':
+            checks.append(_check(label, WARN, 'a recurring template: its dates are a rule, not a day'))
+        elif not (t.get('due') or t.get('scheduled')):
+            checks.append(_check(label, WARN, 'has no due or scheduled date'))
+        else:
+            lines = ghost_lines(t)
+            new += [''] + lines
+            checks.append(_check(label, OK, lines[-1]))
+    found = {t['uuid'] for t in tasks} | {str(t.get('id')) for t in tasks} | {t['uuid'][:8] for t in tasks}
+    checks += [_check(f'task {r}', WARN, 'no such task') for r in good if r not in found]
+    if new:
+        body = text if not text or text.endswith('\n') else text + '\n'
+        write_atomic(my_events_file(), body + '\n'.join(new).lstrip('\n' if not body else '') + '\n')
+        checks += [c for c in write_mine(plan(read_settings(), now.date()), now) if c['status'] != OK]
+        checks += _include_written()
     return checks
 
 
@@ -689,7 +954,8 @@ def _show_report(rows, as_json):
             tags = r.get('kind', '')
         else:
             when = str(r['start']) if r['start'] == r['end'] else f"{r['start']} – {r['end']}"
-            tags = ' '.join(x for x in (r.get('region', ''), r.get('type', '')) if x)
+            tags = r['kind'] if r.get('kind', 'holiday') != 'holiday' else \
+                ' '.join(x for x in (r.get('region', ''), r.get('type', '')) if x)
         print(f"{when:<23} {r.get('name', '')}" + (f'  ({tags})' if tags else ''))
     return 0
 
@@ -716,12 +982,17 @@ def main(argv=None):
     ck = sub.add_parser('check', help='warn when the entries run out or task does not see them')
     ck.add_argument('--days', type=int, default=60, help='warn when they end within this many days')
     ck.add_argument('--json', action='store_true')
+    ad = sub.add_parser('add', help='a ghost of each task: stays on the calendar after the task is gone')
+    ad.add_argument('tasks', nargs='+', metavar='id|uuid')
+    ad.add_argument('--json', action='store_true')
     a = p.parse_args(argv)
 
     if a.cmd == 'refresh':
         return _report(refresh(a.source), a.json)
     if a.cmd == 'init':
         return _report(init(a.locale, a.regions, a.types, a.years, a.moon, a.seasons, a.source), a.json)
+    if a.cmd == 'add':
+        return _report(add(a.tasks), a.json)
     if a.cmd == 'check':
         return _report(check(a.days), a.json)
     return _show_report(show(getattr(a, 'year', None)), getattr(a, 'json', False))
