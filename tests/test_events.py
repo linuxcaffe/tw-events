@@ -302,7 +302,7 @@ def test_sky_off_by_default_but_file_written(tmp_path, tdir):
     src = source(tmp_path, {2026: [rec('2026-01-01', 'New Year')]})
     checks = events.refresh(src, now=NOW)
     _, sky = events.read_data(tdir / 'config' / 'sky.rc')
-    assert sky == [] and any('moon and seasons off' in c['detail'] for c in checks)
+    assert sky == [] and any('moon, seasons and clock off' in c['detail'] for c in checks)
 
 
 def test_sky_entries(tmp_path, tdir, tz):
@@ -562,3 +562,73 @@ def test_refresh_no_fetch_keeps_holidays_and_rebuilds_the_rest(tdir, monkeypatch
     assert (tdir / 'config' / 'holidays.rc').read_bytes() == before
     assert [r['name'] for r in mine_rows(tdir)] == ['Dentist']
     assert events.main(['refresh', '--no-fetch']) == 0
+
+
+# ── clock changes (events.clock): from this machine's own time zone, no network ──
+
+@pytest.mark.parametrize('zone, want', [
+    ('America/Toronto', [('20260308T070000Z', '2026-03-08', 'Clocks forward (EDT)'),
+                         ('20261101T060000Z', '2026-11-01', 'Clocks back (EST)')]),
+    ('Europe/London', [('20260329T010000Z', '2026-03-29', 'Clocks forward (BST)'),
+                       ('20261025T010000Z', '2026-10-25', 'Clocks back (GMT)')]),
+    ('Australia/Sydney', [('20260404T160000Z', '2026-04-05', 'Clocks back (AEST)'),
+                          ('20261003T160000Z', '2026-10-04', 'Clocks forward (AEDT)')]),
+    ('UTC', []),
+    ('America/Regina', []),
+])
+def test_clock_changes(tz, zone, want):
+    tz(zone)
+    got = [(when.strftime('%Y%m%dT%H%M%SZ'), when.astimezone().date().isoformat(), name)
+           for when, name in events.clock_changes(2026)]
+    assert got == want
+
+
+def test_clock_entries_in_sky_rc(tmp_path, tdir, tz):
+    tz('America/Toronto')
+    settings(tdir, 'events.locale = en-CA\nevents.years = 1\nevents.clock = yes\n')
+    events.refresh(FIXTURES, now=NOW)
+    header, rows = events.read_data(tdir / 'config' / 'sky.rc')
+    assert 'clock=yes' in header
+    assert [(r['key'], r['name'], r['kind'], r['at']) for r in rows] == [
+        ('ck20260308a', 'Clocks forward (EDT)', 'clock', '20260308T070000Z'),
+        ('ck20261101a', 'Clocks back (EST)', 'clock', '20261101T060000Z')]
+    assert events._worst(events.check(now=NOW, task_keys=lambda: {'ck20260308a'})) == events.OK
+
+
+def test_clock_off_by_default_and_old_sky_headers_still_match(tmp_path, tdir):
+    settings(tdir, 'events.locale = en-CA\nevents.moon = yes\n')
+    events.refresh(FIXTURES, now=NOW)
+    header, rows = events.read_data(tdir / 'config' / 'sky.rc')
+    assert 'clock' not in header and not any(r['kind'] == 'clock' for r in rows)   # 0.3 headers stay valid
+    settings(tdir, 'events.locale = en-CA\nevents.moon = yes\nevents.clock = yes\n')
+    c = next(c for c in events.check(now=NOW, task_keys=None) if c['check'] == 'sky')
+    assert c['status'] == events.WARN and 'events refresh' in c['detail']
+
+
+def test_init_clock(tdir):
+    _init(tdir, 'en-CA', None, None, None, None, None, 'yes')
+    assert events.read_settings()['clock'] == 'yes'
+    assert 'events.clock' in (tdir / 'config' / 'events.rc').read_text()
+
+
+def test_show_lists_clock_changes(tdir, capsys, tz):
+    tz('America/Toronto')
+    settings(tdir, 'events.locale = en-CA\nevents.years = 1\nevents.clock = yes\n')
+    events.refresh(FIXTURES, now=NOW)
+    events.main(['show', '--year', '2026'])
+    assert '2026-03-08 03:00        Clocks forward (EDT)  (clock)' in capsys.readouterr().out
+
+
+@pytest.mark.skipif(not shutil.which('task'), reason='task not installed')
+def test_task_calendar_shows_clock_changes(tmp_path, tdir, monkeypatch, tz):
+    tz('America/Toronto')
+    settings(tdir, 'events.locale = en-CA\nevents.years = 1\nevents.clock = yes\n')
+    events.refresh(FIXTURES, now=NOW)
+    rc = tmp_path / 'taskrc'
+    (tmp_path / 'data').mkdir()
+    rc.write_text(f"data.location={tmp_path / 'data'}\nhooks=off\nconfirmation=no\ncalendar.holidays=full\n"
+                  f"include {tdir / 'config' / 'sky.rc'}\n")
+    monkeypatch.setenv('TASKRC', str(rc))
+    out = subprocess.run(['task', 'rc.color=off', 'calendar', '11', '2026'],
+                         capture_output=True, text=True, timeout=15).stdout
+    assert 'Clocks back (EST)' in out

@@ -3,7 +3,7 @@
 
 # tw-events
 
-The calendar's non-task entries as Taskwarrior 2.6.2 `holiday.*` entries, so `task calendar`, [tw-web](https://github.com/linuxcaffe/tw-web) and any other client show the same days: public holidays from [holidata.net](https://holidata.net); the moon's phases, the solstices and the equinoxes, computed on your machine; and your own events, including ghosts of tasks you've finished.
+The calendar's non-task entries as Taskwarrior 2.6.2 `holiday.*` entries, so `task calendar`, [tw-web](https://github.com/linuxcaffe/tw-web) and any other client show the same days: public holidays from [holidata.net](https://holidata.net); the moon's phases, the solstices and the equinoxes, and the days the clocks change, computed on your machine; and your own events, including ghosts of tasks you've finished.
 
 ## TL;DR
 
@@ -12,6 +12,7 @@ The calendar's non-task entries as Taskwarrior 2.6.2 `holiday.*` entries, so `ta
 - `events` (or `task events`) lists what's installed; `events check` warns before it runs out
 - Your own events (birthdays, appointments, a week away) go in `~/.task/config/my-events.txt`, one per line, timedot style; `--04-12` means every year
 - `events add 42` makes a **ghost** of task 42: its description at its due (or scheduled) date and time, kept after you complete or delete the task
+- `events.clock = yes` adds the moments the clocks go forward and back, from your machine's own time zone
 - Moon phases and seasons need no network: they're computed with Meeus's *Astronomical Algorithms*, within a minute of PyEphem
 - Runs of consecutive days (a holiday week) become one `.start`/`.end` range, which 2.6.2 understands
 - A failed fetch keeps the old holidays; names can't break out of their rc line
@@ -77,6 +78,7 @@ In [tw-web](https://github.com/linuxcaffe/tw-web) holidays show as amber all-day
 | `events.years` | `2` | This year and the following years (holidays: those holidata has published) |
 | `events.moon` | `no` | The moon's four principal phases: new, first quarter, full, last quarter (about 50 a year) |
 | `events.seasons` | `no` | The March and September equinoxes, the June and December solstices |
+| `events.clock` | `no` | The moments the clocks change: "Clocks forward (EDT)", "Clocks back (EST)" (none in a zone without daylight saving time) |
 
 Run `events refresh` after changing them; `events check` says when you haven't.
 
@@ -120,7 +122,7 @@ Then complete or delete the task as usual; the ghost stays on the calendar. A ta
 
 | Command | Does |
 |---|---|
-| `events init [--locale L] [--regions R] [--types T] [--years N] [--moon yes\|no] [--seasons yes\|no] [--json]` | Write the given settings (keeping the rest), refresh, then add the includes. Offline, it writes an empty holidays file so the include is still safe. Moves tw-holidata 0.1's settings over |
+| `events init [--locale L] [--regions R] [--types T] [--years N] [--moon yes\|no] [--seasons yes\|no] [--clock yes\|no] [--json]` | Write the given settings (keeping the rest), refresh, then add the includes. Offline, it writes an empty holidays file so the include is still safe. Moves tw-holidata 0.1's settings over |
 | `events refresh [--source DIR] [--no-fetch] [--json]` | Fetch and rewrite `config/holidays.rc`, compute `config/sky.rc`, and rebuild `config/mine.rc` from `my-events.txt`. `--source` reads `DIR/<locale>/<year>.json` instead (offline, tests). `--no-fetch` keeps the holidays as they are and rebuilds the rest (no network; gittw runs it after a pull). A year that isn't published yet is skipped; any other failure leaves the holidays untouched (exit 2), but the sky is still written |
 | `events [show] [--year Y] [--json]` | List what's installed |
 | `events add <id\|uuid>… [--json]` | A ghost of each task in `my-events.txt`, then rebuild `mine.rc` (no network) |
@@ -159,10 +161,13 @@ holiday.ss20261221a.at=20261221T205006Z
 
 `mine.rc` is the same shape, `.kind=mine`, with `.at` for a timed event and `.start`/`.end` for a run of days.
 
-Keys are `hd` (holidays), `mn` (moon), `ss` (seasons) or `me` (yours), then the date and `a, b, …`. `.name`, `.date` (or `.start`/`.end`) are Taskwarrior's own; `.type`, `.region`, `.locale`, `.kind` and `.at` (the moment, UTC) are extra keys Taskwarrior ignores and clients may use. A `#` in a name becomes `＃`, because 2.6.2 reads the rest of the line as a comment. Don't edit the files: `refresh` rewrites them whole.
+Clock changes go in `sky.rc` too: `holiday.ck20261101a.name=Clocks back (EST)`, `.kind=clock`, `.at=20261101T060000Z`. They come from this machine's zone (`TZ`, else the system's; on Termux, Android's), checked a day apart and narrowed to the second, named by direction and the new zone's abbreviation.
+
+Keys are `hd` (holidays), `mn` (moon), `ss` (seasons), `ck` (clock) or `me` (yours), then the date and `a, b, …`. `.name`, `.date` (or `.start`/`.end`) are Taskwarrior's own; `.type`, `.region`, `.locale`, `.kind` and `.at` (the moment, UTC) are extra keys Taskwarrior ignores and clients may use. A `#` in a name becomes `＃`, because 2.6.2 reads the rest of the line as a comment. Don't edit the files: `refresh` rewrites them whole.
 
 ## Changes
 
+- **0.4.0** — Clock changes (`events.clock`, `init --clock yes`): the moments the local UTC offset changes, from this machine's time zone, in `sky.rc` as `.kind=clock`.
 - **0.3.1** — The files no longer carry the time they were written, so two stations sharing `~/.task` through gittw write identical files and a sync has nothing to merge. `refresh --no-fetch`.
 - **0.3.0** — Your own events in `config/my-events.txt` (timedot style; `--MM-DD` every year; runs of days), built into `mine.rc`. `events add <id>`: a ghost of a task that stays after the task is done. `refresh` adds the `mine.rc` include to an existing 0.2 install once the file is written.
 - **0.2.0** — Renamed from tw-holidata: the command is `events` (`task events`), settings `events.*` in `events.rc`; `init` moves 0.1's settings over. New: the moon's phases (`events.moon`) and the solstices and equinoxes (`events.seasons`), computed (Meeus), in `sky.rc`.

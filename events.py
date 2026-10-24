@@ -7,7 +7,7 @@ and equinoxes.
 
 Commands
   events init [--locale L] [--regions R] [--types T] [--years N]
-              [--moon yes|no] [--seasons yes|no] [--json]
+              [--moon yes|no] [--seasons yes|no] [--clock yes|no] [--json]
                                   Set up (or change) the settings, refresh, then
                                   add the includes, so none ever points at a
                                   missing file. Moves holidata 0.1 settings over.
@@ -16,7 +16,8 @@ Commands
                                   Fetch the holidays for this year and the next
                                   (events.years), keep national ones plus
                                   events.regions, rewrite config/holidays.rc; and
-                                  compute config/sky.rc. A failed fetch keeps the
+                                  compute config/sky.rc (moon, seasons, clock
+                                  changes). A failed fetch keeps the
                                   old holidays; --no-fetch doesn't fetch them.
   events show [--year Y] [--json] List what's installed (the default).
   events check [--days N] [--json]
@@ -43,17 +44,18 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-__version__ = '0.3.1'
+__version__ = '0.4.0'
 
 OK, WARN, FAIL = 'ok', 'warn', 'fail'
 BASE_URL = 'https://holidata.net'
-DEFAULTS = {'locale': 'en-US', 'regions': '', 'types': '', 'years': '2', 'moon': 'no', 'seasons': 'no'}
+DEFAULTS = {'locale': 'en-US', 'regions': '', 'types': '', 'years': '2', 'moon': 'no', 'seasons': 'no', 'clock': 'no'}
 HEADER_RE = re.compile(r'^# (?:holidata|events|events-sky|events-mine): (.*)$')
-ENTRY_RE = re.compile(r'^holiday\.((?:hd|mn|ss|me)\d{8}[a-z]+)\.'
+ENTRY_RE = re.compile(r'^holiday\.((?:hd|mn|ss|me|ck)\d{8}[a-z]+)\.'
                       r'(name|date|start|end|type|region|locale|kind|at)=(.*)$')
 YES = ('yes', 'on', 'true', '1', 'y')
 
@@ -129,6 +131,7 @@ def plan(settings, today):
         'years':   [today.year + i for i in range(years)],
         'moon':    _yes(settings.get('moon', 'no')),
         'seasons': _yes(settings.get('seasons', 'no')),
+        'clock':   _yes(settings.get('clock', 'no')),
     }
 
 
@@ -139,8 +142,9 @@ def _plan_text(p):
 
 
 def _sky_text(p):
+    """clock= only when on, so a 0.3 file's header still matches settings without it."""
     return (f"moon={'yes' if p['moon'] else 'no'} seasons={'yes' if p['seasons'] else 'no'} "
-            f"years={','.join(map(str, p['years']))}")
+            + ('clock=yes ' if p['clock'] else '') + f"years={','.join(map(str, p['years']))}")
 
 
 def _strip_years(text):
@@ -381,6 +385,31 @@ def seasons(year):
 
 
 
+# ── clock changes: where this machine's UTC offset changes (its own zone: TZ, /etc/localtime) ──
+
+def _offset(t):
+    return time.localtime(t).tm_gmtoff
+
+
+def clock_changes(year):
+    """[(utc datetime, name)] for the moments in that UTC year when the local offset changes: checked
+    a day apart, then narrowed to the second. Named by direction and the new zone's abbreviation."""
+    start = int(dt.datetime(year, 1, 1, tzinfo=dt.timezone.utc).timestamp())
+    end = int(dt.datetime(year + 1, 1, 1, tzinfo=dt.timezone.utc).timestamp())
+    out, t = [], start
+    while t < end:
+        nxt = min(t + 86400, end)
+        if _offset(t) != _offset(nxt):
+            lo, hi = t, nxt                        # offset(lo) is the old one, offset(hi) the new
+            while hi - lo > 1:
+                mid = (lo + hi) // 2
+                lo, hi = (mid, hi) if _offset(mid) == _offset(t) else (lo, mid)
+            name = 'Clocks forward' if _offset(hi) > _offset(t) else 'Clocks back'
+            out.append((dt.datetime.fromtimestamp(hi, dt.timezone.utc), f'{name} ({time.localtime(hi).tm_zone})'))
+        t = nxt
+    return out
+
+
 def sky_entries(p):
     """The moon's phases and the seasons for the planned years, as entries: the date is the local
     day of the moment (this machine's time zone), `at` the moment in UTC, `kind` moon or season."""
@@ -390,6 +419,8 @@ def sky_entries(p):
             rows += [(when, name, 'moon', 'mn') for when, name in moon_phases(year)]
         if p['seasons']:
             rows += [(when, name, 'season', 'ss') for when, name in seasons(year)]
+        if p['clock']:
+            rows += [(when, name, 'clock', 'ck') for when, name in clock_changes(year)]
     rows.sort()
     out, counts = [], {}
     for when, name, kind, prefix in rows:
@@ -404,8 +435,9 @@ def sky_entries(p):
 
 def render_sky(rows, p, now):
     out = [
-        '# Moon phases, solstices and equinoxes, computed by `events refresh` (Meeus, no network).',
-        '# Do not edit: change events.moon / events.seasons in config/events.rc and run `events refresh`.',
+        '# Moon phases, solstices and equinoxes (Meeus) and clock changes (this machine\'s time zone),',
+        '# computed by `events refresh`, no network.',
+        '# Do not edit: change events.moon / .seasons / .clock in config/events.rc and run `events refresh`.',
         f'# events-sky: {_sky_text(p)}',
         '',
     ]
@@ -603,8 +635,9 @@ def refresh(source=None, now=None, settings_path=None, out_path=None, sky_path=N
     # both are off), so its include is always safe.
     sky = sky_entries(p)
     write_atomic(sky_path, render_sky(sky, p, now))
-    what = ' and '.join(w for w, on in (('moon phases', p['moon']), ('seasons', p['seasons'])) if on)
-    checks.append(_check(str(sky_path), OK, f'{len(sky)} {what} written' if what else 'moon and seasons off'))
+    what = ', '.join(w for w, on in (('moon phases', p['moon']), ('seasons', p['seasons']),
+                                     ('clock changes', p['clock'])) if on)
+    checks.append(_check(str(sky_path), OK, f'{len(sky)} {what} written' if what else 'moon, seasons and clock off'))
     if out_path == data_file():
         checks += write_mine(p, now)
         checks += _include_written(settings_path)
@@ -698,11 +731,13 @@ def check(days=60, now=None, settings_path=None, out_path=None, sky_path=None, t
         checks.append(_check('settings', OK, _strip_years(_plan_text(p))))
     checks.append(_coverage('coverage', rows, now, days, 'holidays'))
     sky_header, sky = read_data(sky_path)
-    if p['moon'] or p['seasons']:
+    if p['moon'] or p['seasons'] or p['clock']:
         if _strip_years(sky_header) != _strip_years(_sky_text(p)):
-            checks.append(_check('sky', WARN, 'moon/seasons changed since the last refresh: run events refresh'))
-        else:
+            checks.append(_check('sky', WARN, 'moon/seasons/clock changed since the last refresh: run events refresh'))
+        elif p['moon'] or p['seasons']:
             checks.append(_coverage('sky', sky, now, days, 'moon phases and seasons'))
+        else:
+            checks.append(_check('sky', OK, f'{len(sky)} clock changes'))   # a zone without DST has none
     mine_header, mine_rows = read_data(mine_file())
     text = _read_my_events()
     checks += _problem_checks(parse_my_events(text)[1])
@@ -732,6 +767,7 @@ events.types   = {types}
 events.years   = {years}
 events.moon    = {moon}
 events.seasons = {seasons}
+events.clock   = {clock}
 """
 MY_EVENTS_TEMPLATE = """\
 # Your own events. Run `events refresh` after a change; `events add <id>` appends ghosts of tasks.
@@ -802,7 +838,8 @@ def _yes_no(v):
     return None if v is None else ('yes' if _yes(v) else 'no')
 
 
-def init(locale=None, regions=None, types=None, years=None, moon=None, seasons=None, source=None, now=None):
+def init(locale=None, regions=None, types=None, years=None, moon=None, seasons=None, clock=None, source=None,
+         now=None):
     sp, dp, kp, legacy = settings_file(), data_file(), sky_file(), legacy_settings_file()
     checks = []
     if not sp.is_file() and legacy.is_file():
@@ -811,7 +848,7 @@ def init(locale=None, regions=None, types=None, years=None, moon=None, seasons=N
         checks.append(_check(str(sp), OK, f'settings moved over from {legacy.name}'))
     _set_settings(sp, {'locale': locale, 'regions': regions, 'types': types,
                        'years': None if years is None else str(years),
-                       'moon': _yes_no(moon), 'seasons': _yes_no(seasons)})
+                       'moon': _yes_no(moon), 'seasons': _yes_no(seasons), 'clock': _yes_no(clock)})
     checks.append(_check(str(sp), OK, 'settings written'))
     checks += refresh(source, now)
     if not dp.is_file():
@@ -977,6 +1014,7 @@ def main(argv=None):
     it.add_argument('--years', type=int, help='this year and the next N-1 (default 2)')
     it.add_argument('--moon', metavar='yes|no', help='the moon\'s four phases (default no)')
     it.add_argument('--seasons', metavar='yes|no', help='solstices and equinoxes (default no)')
+    it.add_argument('--clock', metavar='yes|no', help='the days the clocks change (default no)')
     it.add_argument('--source', help=argparse.SUPPRESS)
     it.add_argument('--json', action='store_true')
     sh = sub.add_parser('show', help='list what is installed')
@@ -993,7 +1031,8 @@ def main(argv=None):
     if a.cmd == 'refresh':
         return _report(refresh(a.source, fetch_holidays=not a.no_fetch), a.json)
     if a.cmd == 'init':
-        return _report(init(a.locale, a.regions, a.types, a.years, a.moon, a.seasons, a.source), a.json)
+        return _report(init(a.locale, a.regions, a.types, a.years, a.moon, a.seasons, a.clock,
+                            source=a.source), a.json)
     if a.cmd == 'add':
         return _report(add(a.tasks), a.json)
     if a.cmd == 'check':
