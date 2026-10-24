@@ -2,7 +2,7 @@
 # The calendar's non-task entries as Taskwarrior holiday.* entries (task calendar, tw-web): holidays from holidata.net, moon phases, solstices and equinoxes, your own events and ghosts of tasks; events init/refresh/show/check/add, task events
 
 name=events
-version=0.3.0
+version=0.3.1
 type=wrapper
 description=The calendar's non-task entries as Taskwarrior holiday.* entries (task calendar, tw-web): holidays from holidata.net, moon phases, solstices and equinoxes, your own events and ghosts of tasks; events init/refresh/show/check/add, task events
 repo=https://github.com/linuxcaffe/tw-events

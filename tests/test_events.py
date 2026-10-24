@@ -537,3 +537,28 @@ def test_add_refuses_anything_but_ids_and_uuids(tdir, monkeypatch):
     monkeypatch.setattr(events.subprocess, 'run', lambda *a, **k: pytest.fail('ran task'))
     checks = events.add(['rc.data.location=/tmp', 'project:x'], now=NOW)
     assert [c['status'] for c in checks] == [events.FAIL, events.FAIL]
+
+
+# ── two stations, one repo (gittw): outputs must be byte-identical for the same input ──
+
+def test_outputs_do_not_depend_on_when_they_were_written(tdir):
+    settings(tdir, 'events.locale = en-CA\nevents.moon = yes\n')
+    mine(tdir, '--04-12  Birthday\n')
+    files = [tdir / 'config' / f for f in ('holidays.rc', 'sky.rc', 'mine.rc')]
+    events.refresh(FIXTURES, now=NOW)
+    first = [f.read_bytes() for f in files]
+    events.refresh(FIXTURES, now=NOW + dt.timedelta(hours=5))
+    assert [f.read_bytes() for f in files] == first
+
+
+def test_refresh_no_fetch_keeps_holidays_and_rebuilds_the_rest(tdir, monkeypatch):
+    settings(tdir, 'events.locale = en-CA\n')
+    events.refresh(FIXTURES, now=NOW)
+    before = (tdir / 'config' / 'holidays.rc').read_bytes()
+    mine(tdir, '2026-10-29  Dentist\n')
+    monkeypatch.setattr(events, 'fetch', lambda *a, **k: pytest.fail('fetched'))
+    checks = events.refresh(now=NOW, fetch_holidays=False)
+    assert events._worst(checks) == events.OK, checks
+    assert (tdir / 'config' / 'holidays.rc').read_bytes() == before
+    assert [r['name'] for r in mine_rows(tdir)] == ['Dentist']
+    assert events.main(['refresh', '--no-fetch']) == 0

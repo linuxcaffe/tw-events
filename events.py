@@ -12,12 +12,12 @@ Commands
                                   add the includes, so none ever points at a
                                   missing file. Moves holidata 0.1 settings over.
                                   Safe to run again.
-  events refresh [--source DIR] [--json]
+  events refresh [--source DIR] [--no-fetch] [--json]
                                   Fetch the holidays for this year and the next
                                   (events.years), keep national ones plus
                                   events.regions, rewrite config/holidays.rc; and
                                   compute config/sky.rc. A failed fetch keeps the
-                                  old holidays.
+                                  old holidays; --no-fetch doesn't fetch them.
   events show [--year Y] [--json] List what's installed (the default).
   events check [--days N] [--json]
                                   Read-only. Warn when the entries run out within
@@ -47,7 +47,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-__version__ = '0.3.0'
+__version__ = '0.3.1'
 
 OK, WARN, FAIL = 'ok', 'warn', 'fail'
 BASE_URL = 'https://holidata.net'
@@ -241,7 +241,6 @@ def render(rows, p, now):
         '# Public holidays from https://holidata.net, written by `events refresh`.',
         '# Do not edit: change config/events.rc and run `events refresh`.',
         f'# events: {_plan_text(p)}',
-        f'# generated {now.strftime("%Y-%m-%d %H:%M")}',
         '',
     ]
     for r in rows:
@@ -408,7 +407,6 @@ def render_sky(rows, p, now):
         '# Moon phases, solstices and equinoxes, computed by `events refresh` (Meeus, no network).',
         '# Do not edit: change events.moon / events.seasons in config/events.rc and run `events refresh`.',
         f'# events-sky: {_sky_text(p)}',
-        f'# generated {now.strftime("%Y-%m-%d %H:%M")}',
         '',
     ]
     for r in rows:
@@ -528,7 +526,6 @@ def render_mine(rows, header, now):
         '# Your own events, from config/my-events.txt, written by `events refresh` and `events add`.',
         '# Do not edit: change config/my-events.txt and run `events refresh`.',
         f'# events-mine: {header}',
-        f'# generated {now.strftime("%Y-%m-%d %H:%M")}',
         '',
     ]
     for r in rows:
@@ -569,13 +566,15 @@ def _check(name, status, detail):
     return {'check': name, 'status': status, 'detail': detail}
 
 
-def refresh(source=None, now=None, settings_path=None, out_path=None, sky_path=None):
+def refresh(source=None, now=None, settings_path=None, out_path=None, sky_path=None, fetch_holidays=True):
+    """Outputs depend only on the settings, the sources and the year, never on when they're written:
+    two stations sharing ~/.task (gittw) then write identical files, which git merges as no change."""
     now = now or dt.datetime.now()
     p = plan(read_settings(settings_path), now.date())
     out_path = Path(out_path or data_file())
     sky_path = Path(sky_path or sky_file())
     checks, records = [], []
-    for locale in p['locales']:
+    for locale in (p['locales'] if fetch_holidays else []):
         for year in p['years']:
             try:
                 recs = fetch(locale, year, source)
@@ -592,7 +591,9 @@ def refresh(source=None, now=None, settings_path=None, out_path=None, sky_path=N
             kept = [r for r in recs if keep(r, p)]
             records += kept
             checks.append(_check(f'{locale} {year}', OK, f'{len(kept)} of {len(recs)} kept'))
-    if any(c['status'] == FAIL for c in checks):
+    if not fetch_holidays:
+        checks.append(_check(str(out_path), OK, 'not fetched (--no-fetch)'))
+    elif any(c['status'] == FAIL for c in checks):
         checks.append(_check(str(out_path), WARN, 'not changed (a fetch failed)'))
     else:
         rows = entries(records)
@@ -966,6 +967,8 @@ def main(argv=None):
     sub = p.add_subparsers(dest='cmd')
     rf = sub.add_parser('refresh', help='fetch the holidays, compute the sky, rewrite both files')
     rf.add_argument('--source', help='read DIR/<locale>/<year>.json instead of the site (tests, offline)')
+    rf.add_argument('--no-fetch', action='store_true',
+                    help='keep the holidays as they are; rebuild the sky and your events (no network)')
     rf.add_argument('--json', action='store_true')
     it = sub.add_parser('init', help='set up or change the settings, refresh, add the includes')
     it.add_argument('--locale', help='holidata.net locale, or a comma list (default en-US)')
@@ -988,7 +991,7 @@ def main(argv=None):
     a = p.parse_args(argv)
 
     if a.cmd == 'refresh':
-        return _report(refresh(a.source), a.json)
+        return _report(refresh(a.source, fetch_holidays=not a.no_fetch), a.json)
     if a.cmd == 'init':
         return _report(init(a.locale, a.regions, a.types, a.years, a.moon, a.seasons, a.source), a.json)
     if a.cmd == 'add':

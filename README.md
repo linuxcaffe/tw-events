@@ -121,7 +121,7 @@ Then complete or delete the task as usual; the ghost stays on the calendar. A ta
 | Command | Does |
 |---|---|
 | `events init [--locale L] [--regions R] [--types T] [--years N] [--moon yes\|no] [--seasons yes\|no] [--json]` | Write the given settings (keeping the rest), refresh, then add the includes. Offline, it writes an empty holidays file so the include is still safe. Moves tw-holidata 0.1's settings over |
-| `events refresh [--source DIR] [--json]` | Fetch and rewrite `config/holidays.rc`, compute `config/sky.rc`, and rebuild `config/mine.rc` from `my-events.txt`. `--source` reads `DIR/<locale>/<year>.json` instead (offline, tests). A year that isn't published yet is skipped; any other failure leaves the holidays untouched (exit 2), but the sky is still written |
+| `events refresh [--source DIR] [--no-fetch] [--json]` | Fetch and rewrite `config/holidays.rc`, compute `config/sky.rc`, and rebuild `config/mine.rc` from `my-events.txt`. `--source` reads `DIR/<locale>/<year>.json` instead (offline, tests). `--no-fetch` keeps the holidays as they are and rebuilds the rest (no network; gittw runs it after a pull). A year that isn't published yet is skipped; any other failure leaves the holidays untouched (exit 2), but the sky is still written |
 | `events [show] [--year Y] [--json]` | List what's installed |
 | `events add <id\|uuid>… [--json]` | A ghost of each task in `my-events.txt`, then rebuild `mine.rc` (no network) |
 | `events check [--days 60] [--json]` | Read-only. Warns when the entries end within `--days`, when the settings or `my-events.txt` changed since the last refresh, on lines in `my-events.txt` it can't read, or when `task` doesn't see them (no include). [taskutil](https://github.com/linuxcaffe/tw-taskutil) runs it daily |
@@ -163,6 +163,7 @@ Keys are `hd` (holidays), `mn` (moon), `ss` (seasons) or `me` (yours), then the 
 
 ## Changes
 
+- **0.3.1** — The files no longer carry the time they were written, so two stations sharing `~/.task` through gittw write identical files and a sync has nothing to merge. `refresh --no-fetch`.
 - **0.3.0** — Your own events in `config/my-events.txt` (timedot style; `--MM-DD` every year; runs of days), built into `mine.rc`. `events add <id>`: a ghost of a task that stays after the task is done. `refresh` adds the `mine.rc` include to an existing 0.2 install once the file is written.
 - **0.2.0** — Renamed from tw-holidata: the command is `events` (`task events`), settings `events.*` in `events.rc`; `init` moves 0.1's settings over. New: the moon's phases (`events.moon`) and the solstices and equinoxes (`events.seasons`), computed (Meeus), in `sky.rc`.
 - **0.1.1** — `check` and `show` say to run `init` when it hasn't been run. README: the two install steps, locale and region codes, sample output.
